@@ -20,45 +20,54 @@ from data_loader import preprocess_text
 from train import StyleAIClassifier
 
 def load_custom_model(model_path: str, device: torch.device):
+    """
+    Carga el modelo V2 (StyleAIClassifierV2) sincronizado con el entrenamiento,
+    forzando la precisión Float32 para evitar errores de mismatch de tipos.
+    """
     from transformers import AutoConfig, AutoModel, AutoTokenizer
     import os
-    
-    print(f"Cargando configuración desde {model_path}...")
 
-    # 1. Cargamos la configuración (esto lee el config.json y NO busca pesos)
+    print(f"Iniciando carga de configuración y arquitectura desde {model_path}...")
+    
+    # 1. Cargamos la configuración base (esto no lee los archivos de pesos pesados)
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     
-    # 2. Cargamos el tokenizer (usa vocab.txt y tokenizer.json)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-
-    # 3. Definimos la arquitectura V2
+    # 2. Definición de la arquitectura exacta V2
     class StyleAIClassifierV2(torch.nn.Module):
         def __init__(self, cfg):
             super().__init__()
-            # USA .from_config EN LUGAR DE .from_pretrained
-            # Esto crea la arquitectura vacía y NO busca archivos .bin o .safetensors
-            self.encoder = AutoModel.from_config(cfg) 
+            # Cargamos la estructura vacía basada en la configuración
+            # Esto evita errores si el archivo .safetensors original no está o es corrupto
+            self.encoder = AutoModel.from_config(cfg)
             self.dropout = torch.nn.Dropout(0.2)
             self.classifier = torch.nn.Linear(768, 2)
 
         def forward(self, input_ids, attention_mask):
             outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            # Usamos el token [CLS] igual que en tu entrenamiento
+            # Usamos el token [CLS] (índice 0) igual que en tu entrenamiento en la Universidad de Guayaquil
             return self.classifier(self.dropout(outputs.last_hidden_state[:, 0, :]))
 
+    # 3. Instanciar el modelo vacío y el tokenizador
     model = StyleAIClassifierV2(config)
-
-    # 4. Inyectamos TUS pesos entrenados de 1GB
-    pt_path = os.path.join(model_path, 'best_model.pt')
-    print(f"Inyectando tus pesos desde {pt_path}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     
+    # 4. Carga manual de tus pesos entrenados (best_model.pt)
+    pt_path = os.path.join(model_path, 'best_model.pt')
     if os.path.exists(pt_path):
-        # Cargamos el archivo .pt que TIRA sí encuentra
+        print(f"Inyectando pesos desde {pt_path}...")
+        # Cargamos el state_dict (weights_only=False por compatibilidad con archivos de Colab/Kaggle)
         checkpoint = torch.load(pt_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
-        print("✅ ¡Modelo cargado exitosamente con pesos inyectados!")
+        
+        # --- CAMBIO CRÍTICO PARA EL ERROR DE DTYPE ---
+        # Convertimos todo el modelo a Float32. Esto asegura que tanto el encoder 
+        # como la capa classifier usen el mismo tipo de dato, eliminando el error de BFloat16.
+        model = model.float() 
+        # ---------------------------------------------
+        
+        print("✅ Modelo V2 cargado y convertido a Float32 exitosamente.")
     else:
-        raise FileNotFoundError(f"No se encontró el archivo {pt_path}")
+        raise FileNotFoundError(f"❌ ERROR: No se encontró el archivo de pesos en {pt_path}")
         
     model.to(device).eval()
     return model, tokenizer
