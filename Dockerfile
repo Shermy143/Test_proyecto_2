@@ -12,8 +12,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && rm -rf /root/.cache/pip
 
 # ---- Código fuente y modelo ----
-COPY data_loader.py .
-COPY train.py      .
 COPY run.py        .
 COPY ./models      /app/models
 
