@@ -20,38 +20,45 @@ from data_loader import preprocess_text
 from train import StyleAIClassifier
 
 def load_custom_model(model_path: str, device: torch.device):
-    """
-    Carga el modelo V2 (StyleAIClassifierV2) sincronizado con el entrenamiento.
-    """
-    from transformers import AutoModel, AutoTokenizer
-    print(f"Iniciando carga de modelo V2 desde {model_path}...")
+    from transformers import AutoConfig, AutoModel, AutoTokenizer
+    import os
     
-    # 1. Definir la arquitectura EXACTA de la V2
+    print(f"Cargando configuración desde {model_path}...")
+
+    # 1. Cargamos la configuración (esto lee el config.json y NO busca pesos)
+    config = AutoConfig.from_pretrained(model_path, local_files_only=True)
+    
+    # 2. Cargamos el tokenizer (usa vocab.txt y tokenizer.json)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+
+    # 3. Definimos la arquitectura V2
     class StyleAIClassifierV2(torch.nn.Module):
-        def __init__(self, model_name_or_path):
+        def __init__(self, cfg):
             super().__init__()
-            self.encoder = AutoModel.from_pretrained(model_name_or_path)
+            # USA .from_config EN LUGAR DE .from_pretrained
+            # Esto crea la arquitectura vacía y NO busca archivos .bin o .safetensors
+            self.encoder = AutoModel.from_config(cfg) 
             self.dropout = torch.nn.Dropout(0.2)
             self.classifier = torch.nn.Linear(768, 2)
 
         def forward(self, input_ids, attention_mask):
             outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            # Usamos el token [CLS] (índice 0) igual que en tu entrenamiento
+            # Usamos el token [CLS] igual que en tu entrenamiento
             return self.classifier(self.dropout(outputs.last_hidden_state[:, 0, :]))
 
-    # 2. Instanciar y cargar pesos
-    # Usamos model_path porque ahí debe estar el config.json del modelo base
-    model = StyleAIClassifierV2(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    
+    model = StyleAIClassifierV2(config)
+
+    # 4. Inyectamos TUS pesos entrenados de 1GB
     pt_path = os.path.join(model_path, 'best_model.pt')
+    print(f"Inyectando tus pesos desde {pt_path}...")
+    
     if os.path.exists(pt_path):
+        # Cargamos el archivo .pt que TIRA sí encuentra
         checkpoint = torch.load(pt_path, map_location=device, weights_only=False)
-        # Cargamos el state_dict directamente
         model.load_state_dict(checkpoint['model_state_dict'])
-        print("✅ Pesos V2 cargados exitosamente.")
+        print("✅ ¡Modelo cargado exitosamente con pesos inyectados!")
     else:
-        print("❌ ERROR: No se encontró best_model.pt")
+        raise FileNotFoundError(f"No se encontró el archivo {pt_path}")
         
     model.to(device).eval()
     return model, tokenizer
