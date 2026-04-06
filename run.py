@@ -74,12 +74,15 @@ def load_custom_model(model_path: str, device: torch.device):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inferencia para PAN 2026")
-    parser.add_argument("-i", "--input", type=str, help="Carpeta de entrada (variable $inputDataset en TIRA)")
-    parser.add_argument("-o", "--output", type=str, help="Carpeta para guardar predictions.jsonl ($outputDir)")
-    parser.add_argument("--model_path", type=str, default="/app/models", help="Ruta al modelo fine-tuneado")
+    parser.add_argument("input_file", type=str, help="Ruta completa al archivo dataset.jsonl")
+    parser.add_argument("output_dir", type=str, help="Carpeta para guardar predictions.jsonl")
+    parser.add_argument("--model_path", type=str, default="/app/models", help="Ruta al modelo")
     
     args = parser.parse_args()
     
+    input_file_path = args.input_file
+    output_dir = args.output_dir
+
     if args.input and args.output:
         # Modo por lotes para TIRA
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
