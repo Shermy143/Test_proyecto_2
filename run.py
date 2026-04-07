@@ -73,99 +73,107 @@ def load_custom_model(model_path: str, device: torch.device):
     return model, tokenizer
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Inferencia para PAN 2026 - Universidad de Guayaquil")
+    parser = argparse.ArgumentParser(description="Inferencia PAN 2026 - Versión Híbrida (Docker + Local)")
     
-    # Argumentos posicionales requeridos por la plataforma TIRA
-    parser.add_argument("input_file", type=str, help="Ruta completa al archivo dataset.jsonl")
-    parser.add_argument("output_dir", type=str, help="Carpeta donde se guardará predictions.jsonl")
-    parser.add_argument("--model_path", type=str, default="/app/models", help="Ruta al directorio del modelo")
+    # 1. Argumentos con banderas (Prioridad para TIRA Docker)
+    parser.add_argument("-i", "--input", type=str, help="Carpeta de entrada (usado por TIRA Docker)")
+    parser.add_argument("-o", "--output", type=str, help="Carpeta de salida (usado por TIRA Docker)")
+    
+    # 2. Argumentos posicionales (Compatibilidad con Upload Run y manual)
+    # nargs='?' permite que sean opcionales si ya se pasaron las banderas -i/-o
+    parser.add_argument("input_pos", type=str, nargs='?', help="Ruta de entrada manual")
+    parser.add_argument("output_pos", type=str, nargs='?', help="Ruta de salida manual")
+    
+    parser.add_argument("--model_path", type=str, default="/app/models", help="Ruta al modelo")
     
     args = parser.parse_args()
     
+    # 3. Lógica de selección de rutas: si no hay banderas, usa los posicionales
+    raw_input = args.input if args.input else args.input_pos
+    final_output_dir = args.output if args.output else args.output_pos
+
+    if not raw_input or not final_output_dir:
+        print("❌ ERROR: Debes proporcionar entrada y salida.")
+        parser.print_help()
+        exit(1)
+
+    # 4. Normalización de la entrada: ¿Es una carpeta o un archivo directo?
+    # TIRA suele pasar una carpeta en Docker, pero un archivo en manual.
+    if os.path.isdir(raw_input):
+        input_file_path = os.path.join(raw_input, 'dataset.jsonl')
+    else:
+        input_file_path = raw_input
+
     # Configuración de dispositivo
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🚀 Usando dispositivo: {device}")
 
-    # 1. Cargar modelo con corrección Float32 integrada
+    # Cargar modelo y configuración de abstención
     model, tokenizer = load_custom_model(args.model_path, device)
     
-    # 2. Cargar parámetros de abstención (Threshold y Margin)
-    threshold = 0.5
-    margin = 0.0
+    threshold, margin = 0.5, 0.0
     thr_path = os.path.join(args.model_path, 'threshold_config.json')
-    
     if os.path.exists(thr_path):
         try:
             with open(thr_path, 'r') as f:
                 cfg = json.load(f)
                 threshold = cfg.get('best_threshold', 0.5)
                 margin = cfg.get('best_margin', 0.0)
-            print(f"🎯 Configuración de Abstención: Threshold={threshold:.3f}, Margin={margin:.3f}")
+            print(f"🎯 Abstención: Threshold={threshold:.3f}, Margin={margin:.3f}")
         except Exception as e:
-            print(f"ADVERTENCIA: No se pudo leer {thr_path}: {e}")
+            print(f"⚠️ Error cargando umbral: {e}")
     
-    # 3. Preparar directorio de salida
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    # Preparar salida
+    if not os.path.exists(final_output_dir):
+        os.makedirs(final_output_dir)
 
-    output_predictions = os.path.join(args.output_dir, 'predictions.jsonl')
+    output_file = os.path.join(final_output_dir, 'predictions.jsonl')
     total_processed = 0
 
-    print(f"📄 Procesando archivo: {args.input_file}")
+    print(f"📄 Procesando: {input_file_path}")
     
-    # 4. Bucle de inferencia optimizado para lectura directa de archivo
-    with open(output_predictions, 'w', encoding='utf-8') as out_file:
-        if not os.path.exists(args.input_file):
-            print(f"❌ ERROR: El archivo de entrada {args.input_file} no existe.")
-            exit(1)
+    # Bucle de inferencia
+    if not os.path.exists(input_file_path):
+        print(f"❌ ERROR: No existe el archivo {input_file_path}")
+        exit(1)
 
-        with open(args.input_file, 'r', encoding='utf-8') as in_file:
-            for line in in_file:
-                if not line.strip():
-                    continue
-                    
-                item = json.loads(line)
-                text_id = item.get('id', f'item_{total_processed}')
-                raw_text = item.get('text', '')
+    with open(output_file, 'w', encoding='utf-8') as out_f:
+        with open(input_file_path, 'r', encoding='utf-8') as in_f:
+            for line in in_f:
+                if not line.strip(): continue
                 
-                # Preprocesamiento (Asegúrate de que preprocess_text esté definido arriba)
-                clean_text = preprocess_text(raw_text)
+                item = json.loads(line)
+                text_id = item.get('id', f'it_{total_processed}')
+                clean_text = preprocess_text(item.get('text', ''))
                 
                 if not clean_text:
-                    # Caso de texto vacío: asignamos neutralidad (0.5)
-                    out_file.write(json.dumps({"id": text_id, "label": 0.5}) + '\n')
+                    out_f.write(json.dumps({"id": text_id, "label": 0.5}) + '\n')
                     total_processed += 1
                     continue
                 
-                # Tokenización e inferencia
                 inputs = tokenizer(
                     clean_text, 
                     return_tensors="pt", 
                     truncation=True, 
-                    max_length=512, # Restaurado a 512 para máxima precisión local
+                    max_length=512, 
                     padding=False
-                )
-                
-                input_ids = inputs['input_ids'].to(device)
-                attention_mask = inputs['attention_mask'].to(device)
+                ).to(device)
                 
                 with torch.inference_mode():
-                    logits = model(input_ids, attention_mask)
+                    logits = model(inputs['input_ids'], inputs['attention_mask'])
                     probs = torch.softmax(logits, dim=1)
                     score = probs[0][1].item()
                     
-                # Aplicar lógica de abstención basada en margen
+                # Aplicar abstención
                 if (threshold - margin) <= score <= (threshold + margin):
                     final_score = 0.5
                 else:
                     final_score = float(score)
                     
-                # Escritura inmediata al archivo (ahorra memoria RAM)
-                out_file.write(json.dumps({"id": text_id, "label": final_score}) + '\n')
+                out_f.write(json.dumps({"id": text_id, "label": final_score}) + '\n')
                 total_processed += 1
                 
                 if total_processed % 500 == 0:
-                    print(f"  ... procesados {total_processed} items.")
+                    print(f"  ... {total_processed} procesados")
                             
-    print(f"\n✅ ¡Proceso completado! Total predicciones: {total_processed}")
-    print(f"📁 Resultado guardado en: {output_predictions}")
+    print(f"\n✅ ¡Éxito! Predicciones guardadas en: {output_file}")
