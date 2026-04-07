@@ -41,17 +41,22 @@ def preprocess_text(text: str) -> str:
         return ""
 
     # Eliminar URLs
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+    #text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
 
     # Eliminar menciones y hashtags
-    text = re.sub(r'@\w+', '', text)
-    text = re.sub(r'#\w+', '', text)
+    #text = re.sub(r'@\w+', '', text)
+    #text = re.sub(r'#\w+', '', text)
 
     # Normalizar espacios múltiples PERO preservar saltos de línea
-    text = re.sub(r'[^\S\n]+', ' ', text)
+    #text = re.sub(r'[^\S\n]+', ' ', text)
 
     # Eliminar líneas vacías múltiples
-    text = re.sub(r'\n\s*\n', '\n\n', text)
+    #text = re.sub(r'\n\s*\n', '\n\n', text)
+
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'@\w+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
 
     return text.strip()
 
