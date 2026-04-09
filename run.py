@@ -13,11 +13,9 @@ import json
 import argparse
 import warnings
 import torch
-from sentence_transformers import SentenceTransformer
 
 warnings.filterwarnings('ignore')
 from data_loader import preprocess_text
-from train import StyleAIClassifier
 
 def load_custom_model(model_path: str, device: torch.device):
     """
@@ -25,46 +23,71 @@ def load_custom_model(model_path: str, device: torch.device):
     forzando la precisión Float32 para evitar errores de mismatch de tipos.
     """
     from transformers import AutoConfig, AutoModel, AutoTokenizer
-    import os
 
     print(f"Iniciando carga de configuración y arquitectura desde {model_path}...")
     
-    # 1. Cargamos la configuración base (esto no lee los archivos de pesos pesados)
+    # 1. Cargamos la configuración base
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     
     # 2. Definición de la arquitectura exacta V2
     class StyleAIClassifierV2(torch.nn.Module):
         def __init__(self, cfg):
             super().__init__()
-            # Cargamos la estructura vacía basada en la configuración
-            # Esto evita errores si el archivo .safetensors original no está o es corrupto
             self.encoder = AutoModel.from_config(cfg)
-            self.dropout = torch.nn.Dropout(0.2)
-            self.classifier = torch.nn.Linear(768, 2)
+            # Ajustado a 0.3 para hacer match con config.json y train.py
+            self.dropout = torch.nn.Dropout(0.3)
+            # Usamos el hidden_size dinámico (usualmente 768 para XLM-R)
+            self.classifier = torch.nn.Linear(cfg.hidden_size, 2)
 
         def forward(self, input_ids, attention_mask):
             outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            # Usamos el token [CLS] (índice 0) igual que en tu entrenamiento en la Universidad de Guayaquil
-            return self.classifier(self.dropout(outputs.last_hidden_state[:, 0, :]))
+            
+            # CORRECCIÓN DE POOLING:
+            # Recreamos el Mean Pooling que usa SentenceTransformer internamente,
+            # ya que el token [CLS] (índice 0) no es lo que el clasificador aprendió a leer.
+            token_embeddings = outputs.last_hidden_state
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            sentence_embedding = sum_embeddings / sum_mask
+            
+            return self.classifier(self.dropout(sentence_embedding))
 
     # 3. Instanciar el modelo vacío y el tokenizador
     model = StyleAIClassifierV2(config)
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     
-    # 4. Carga manual de tus pesos entrenados (best_model.pt)
+    # 4. Carga manual de los pesos entrenados
     pt_path = os.path.join(model_path, 'best_model.pt')
     if os.path.exists(pt_path):
         print(f"Inyectando pesos desde {pt_path}...")
-        # Cargamos el state_dict (weights_only=False por compatibilidad con archivos de Colab/Kaggle)
         checkpoint = torch.load(pt_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
         
-        # --- CAMBIO CRÍTICO PARA EL ERROR DE DTYPE ---
-        # Convertimos todo el modelo a Float32. Esto asegura que tanto el encoder 
-        # como la capa classifier usen el mismo tipo de dato, eliminando el error de BFloat16.
+        # --- MAPEO DINÁMICO DE CLAVES (STATE DICT FIX) ---
+        new_state_dict = {}
+        for key, value in checkpoint['model_state_dict'].items():
+            new_key = key
+            
+            # Ajustamos el prefijo del encoder
+            if key.startswith('encoder.0.auto_model.'):
+                new_key = key.replace('encoder.0.auto_model.', 'encoder.')
+            
+            # Ajustamos el clasificador
+            elif key == 'classifier.1.weight':
+                new_key = 'classifier.weight'
+            elif key == 'classifier.1.bias':
+                new_key = 'classifier.bias'
+            
+            # Filtramos cualquier llave residual (como las capas de pooling propias de SentenceTransformer)
+            if new_key.startswith('encoder.') or new_key.startswith('classifier.'):
+                new_state_dict[new_key] = value
+        # -------------------------------------------------
+        
+        # load_state_dict con strict=False ignora capas sobrantes de SentenceTransformer
+        model.load_state_dict(new_state_dict, strict=False)
+        
+        # Convertimos todo el modelo a Float32
         model = model.float() 
-        # ---------------------------------------------
-        
         print("✅ Modelo V2 cargado y convertido a Float32 exitosamente.")
     else:
         raise FileNotFoundError(f"❌ ERROR: No se encontró el archivo de pesos en {pt_path}")
@@ -73,22 +96,16 @@ def load_custom_model(model_path: str, device: torch.device):
     return model, tokenizer
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Inferencia PAN 2026 - Versión Híbrida (Docker + Local)")
+    parser = argparse.ArgumentParser(description="Inferencia PAN 2026 - Versión Híbrida")
     
-    # 1. Argumentos con banderas (Prioridad para TIRA Docker)
     parser.add_argument("-i", "--input", type=str, help="Carpeta de entrada (usado por TIRA Docker)")
     parser.add_argument("-o", "--output", type=str, help="Carpeta de salida (usado por TIRA Docker)")
-    
-    # 2. Argumentos posicionales (Compatibilidad con Upload Run y manual)
-    # nargs='?' permite que sean opcionales si ya se pasaron las banderas -i/-o
     parser.add_argument("input_pos", type=str, nargs='?', help="Ruta de entrada manual")
     parser.add_argument("output_pos", type=str, nargs='?', help="Ruta de salida manual")
-    
     parser.add_argument("--model_path", type=str, default="/app/models", help="Ruta al modelo")
     
     args = parser.parse_args()
     
-    # 3. Lógica de selección de rutas: si no hay banderas, usa los posicionales
     raw_input = args.input if args.input else args.input_pos
     final_output_dir = args.output if args.output else args.output_pos
 
@@ -97,18 +114,14 @@ if __name__ == "__main__":
         parser.print_help()
         exit(1)
 
-    # 4. Normalización de la entrada: ¿Es una carpeta o un archivo directo?
-    # TIRA suele pasar una carpeta en Docker, pero un archivo en manual.
     if os.path.isdir(raw_input):
         input_file_path = os.path.join(raw_input, 'dataset.jsonl')
     else:
         input_file_path = raw_input
 
-    # Configuración de dispositivo
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🚀 Usando dispositivo: {device}")
 
-    # Cargar modelo y configuración de abstención
     model, tokenizer = load_custom_model(args.model_path, device)
     
     threshold, margin = 0.5, 0.0
@@ -123,7 +136,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️ Error cargando umbral: {e}")
     
-    # Preparar salida
     if not os.path.exists(final_output_dir):
         os.makedirs(final_output_dir)
 
@@ -132,7 +144,6 @@ if __name__ == "__main__":
 
     print(f"📄 Procesando: {input_file_path}")
     
-    # Bucle de inferencia
     if not os.path.exists(input_file_path):
         print(f"❌ ERROR: No existe el archivo {input_file_path}")
         exit(1)
@@ -164,7 +175,6 @@ if __name__ == "__main__":
                     probs = torch.softmax(logits, dim=1)
                     score = probs[0][1].item()
                     
-                # Aplicar abstención
                 if (threshold - margin) <= score <= (threshold + margin):
                     final_score = 0.5
                 else:
