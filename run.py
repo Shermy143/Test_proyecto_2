@@ -24,27 +24,33 @@ def load_custom_model(model_path: str, device: torch.device):
     """
     from transformers import AutoConfig, AutoModel, AutoTokenizer
 
-    print(f"Iniciando carga de configuración y arquitectura desde {model_path}...")
+    # 1. Buscamos la configuración real de la arquitectura.
+    # Si model_path es ".../models", buscamos la carpeta "hf_model" en el directorio padre.
+    parent_dir = os.path.dirname(model_path)
+    hf_dir = os.path.join(parent_dir, 'hf_model')
     
-    # 1. Cargamos la configuración base
-    config = AutoConfig.from_pretrained(model_path, local_files_only=True)
-    
+    if os.path.exists(hf_dir) and os.path.exists(os.path.join(hf_dir, 'config.json')):
+        print(f"Iniciando carga de configuración y arquitectura desde {hf_dir}...")
+        config = AutoConfig.from_pretrained(hf_dir, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(hf_dir, local_files_only=True)
+    else:
+        print("⚠️ No se encontró config HF local. Descargando arquitectura base desde HuggingFace Hub...")
+        base_name = "StyleDistance/mStyleDistance"
+        config = AutoConfig.from_pretrained(base_name)
+        tokenizer = AutoTokenizer.from_pretrained(base_name)
+        
     # 2. Definición de la arquitectura exacta V2
     class StyleAIClassifierV2(torch.nn.Module):
         def __init__(self, cfg):
             super().__init__()
             self.encoder = AutoModel.from_config(cfg)
-            # Ajustado a 0.3 para hacer match con config.json y train.py
             self.dropout = torch.nn.Dropout(0.3)
-            # Usamos el hidden_size dinámico (usualmente 768 para XLM-R)
             self.classifier = torch.nn.Linear(cfg.hidden_size, 2)
 
         def forward(self, input_ids, attention_mask):
             outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
             
-            # CORRECCIÓN DE POOLING:
-            # Recreamos el Mean Pooling que usa SentenceTransformer internamente,
-            # ya que el token [CLS] (índice 0) no es lo que el clasificador aprendió a leer.
+            # Mean Pooling
             token_embeddings = outputs.last_hidden_state
             input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
             sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
@@ -55,7 +61,6 @@ def load_custom_model(model_path: str, device: torch.device):
 
     # 3. Instanciar el modelo vacío y el tokenizador
     model = StyleAIClassifierV2(config)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     
     # 4. Carga manual de los pesos entrenados
     pt_path = os.path.join(model_path, 'best_model.pt')
@@ -68,25 +73,18 @@ def load_custom_model(model_path: str, device: torch.device):
         for key, value in checkpoint['model_state_dict'].items():
             new_key = key
             
-            # Ajustamos el prefijo del encoder
             if key.startswith('encoder.0.auto_model.'):
                 new_key = key.replace('encoder.0.auto_model.', 'encoder.')
-            
-            # Ajustamos el clasificador
             elif key == 'classifier.1.weight':
                 new_key = 'classifier.weight'
             elif key == 'classifier.1.bias':
                 new_key = 'classifier.bias'
             
-            # Filtramos cualquier llave residual (como las capas de pooling propias de SentenceTransformer)
             if new_key.startswith('encoder.') or new_key.startswith('classifier.'):
                 new_state_dict[new_key] = value
         # -------------------------------------------------
         
-        # load_state_dict con strict=False ignora capas sobrantes de SentenceTransformer
         model.load_state_dict(new_state_dict, strict=False)
-        
-        # Convertimos todo el modelo a Float32
         model = model.float() 
         print("✅ Modelo V2 cargado y convertido a Float32 exitosamente.")
     else:
