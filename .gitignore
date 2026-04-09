@@ -2,3 +2,4 @@ AGENTS.md
 image.png
 outputs/
 dataset.jsonl
+models/best_model.pt
