@@ -53,19 +53,6 @@ def load_custom_model(model_path: str, device: torch.device):
     
     # 4. Carga manual de tus pesos entrenados (best_model.pt)
     pt_path = os.path.join(model_path, 'best_model.pt')
-    
-    # 4.1 Reensamblar modelo si no existe pero están sus partes (evita el límite de 2GB de GitHub LFS)
-    if not os.path.exists(pt_path):
-        import glob
-        partes = sorted(glob.glob(pt_path + ".part*"))
-        if partes:
-            print(f"📦 Reconstruyendo archivo de pesos desde {len(partes)} partes divididas...")
-            with open(pt_path, 'wb') as outfile:
-                for parte in partes:
-                    with open(parte, 'rb') as infile:
-                        outfile.write(infile.read())
-            print("✅ Reconstrucción del archivo de pesos completada.")
-
     if os.path.exists(pt_path):
         print(f"Inyectando pesos desde {pt_path}...")
         # Cargamos el state_dict (weights_only=False por compatibilidad con archivos de Colab/Kaggle)
